@@ -50,7 +50,7 @@ import           Web.HttpApiData
 import           Prelude ()
 import           Prelude.Compat
 import           Servant.API.Header
-                 (Header)
+                 (Header, Header')
 
 -- | Response Header objects. You should never need to construct one directly.
 -- Instead, use 'addOptionalHeader'.
@@ -128,7 +128,7 @@ instance GetHeadersFromHList '[] where
     getHeadersFromHList _ = []
 
 instance (KnownSymbol h, ToHttpApiData x, GetHeadersFromHList xs)
-    => GetHeadersFromHList (Header h x ': xs)
+    => GetHeadersFromHList (Header' mods h x ': xs)
   where
     getHeadersFromHList hdrs = case hdrs of
         Header val `HCons` rest          -> (headerName , toHeader val) : getHeadersFromHList rest
@@ -149,7 +149,7 @@ instance GetHeaders' '[] where
     getHeaders' _ = []
 
 instance (KnownSymbol h, GetHeadersFromHList rest, ToHttpApiData v)
-    => GetHeaders' (Header h v ': rest)
+    => GetHeaders' (Header' mods h v ': rest)
   where
     getHeaders' hs = getHeadersFromHList $ getHeadersHList hs
 

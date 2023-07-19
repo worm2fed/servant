@@ -37,7 +37,7 @@ module Servant.API.ResponseHeaders
 import           Control.DeepSeq
                  (NFData (..))
 import           Data.ByteString.Char8     as BS
-                 (ByteString, init, pack, unlines)
+                 (ByteString, pack)
 import qualified Data.CaseInsensitive      as CI
 import qualified Data.List                 as L
 import           Data.Proxy
@@ -52,7 +52,7 @@ import           Web.HttpApiData
 import           Prelude ()
 import           Prelude.Compat
 import           Servant.API.Header
-                 (Header)
+                 (Header, Header')
 import           Servant.API.UVerb.Union
 import qualified Data.SOP.BasicFunctors as SOP
 import qualified Data.SOP.NS as SOP
@@ -81,11 +81,11 @@ instance NFData a => NFData (ResponseHeader sym a) where
 
 data HList a where
     HNil  :: HList '[]
-    HCons :: ResponseHeader h x -> HList xs -> HList (Header h x ': xs)
+    HCons :: ResponseHeader h x -> HList xs -> HList (Header' mods h x ': xs)
 
 class NFDataHList xs where rnfHList :: HList xs -> ()
 instance NFDataHList '[] where rnfHList HNil = ()
-instance (y ~ Header h x, NFData x, NFDataHList xs) => NFDataHList (y ': xs) where
+instance (y ~ Header' mods h x, NFData x, NFDataHList xs) => NFDataHList (y ': xs) where
     rnfHList (HCons h xs) = rnf h `seq` rnfHList xs
 
 instance NFDataHList xs => NFData (HList xs) where
@@ -93,7 +93,7 @@ instance NFDataHList xs => NFData (HList xs) where
 
 type family HeaderValMap (f :: * -> *) (xs :: [*]) where
     HeaderValMap f '[]                = '[]
-    HeaderValMap f (Header h x ': xs) = Header h (f x) ': HeaderValMap f xs
+    HeaderValMap f (Header' mods h x ': xs) = Header' mods h (f x) ': HeaderValMap f xs
 
 
 class BuildHeadersTo hs where
@@ -105,7 +105,7 @@ instance {-# OVERLAPPING #-} BuildHeadersTo '[] where
 -- The current implementation does not manipulate HTTP header field lines in any way,
 -- like merging field lines with the same field name in a single line.
 instance {-# OVERLAPPABLE #-} ( FromHttpApiData v, BuildHeadersTo xs, KnownSymbol h )
-         => BuildHeadersTo (Header h v ': xs) where
+         => BuildHeadersTo (Header' mods h v ': xs) where
     buildHeadersTo headers = case L.find wantedHeader headers of
       Nothing -> MissingHeader `HCons` buildHeadersTo headers
       Just header@(_, val) -> case parseHeader val of
@@ -130,7 +130,7 @@ instance GetHeadersFromHList '[] where
     getHeadersFromHList _ = []
 
 instance (KnownSymbol h, ToHttpApiData x, GetHeadersFromHList xs)
-    => GetHeadersFromHList (Header h x ': xs)
+    => GetHeadersFromHList (Header' mods h x ': xs)
   where
     getHeadersFromHList hdrs = case hdrs of
         Header val `HCons` rest          -> (headerName , toHeader val) : getHeadersFromHList rest
@@ -151,42 +151,42 @@ instance GetHeaders' '[] where
     getHeaders' _ = []
 
 instance (KnownSymbol h, GetHeadersFromHList rest, ToHttpApiData v)
-    => GetHeaders' (Header h v ': rest)
+    => GetHeaders' (Header' mods h v ': rest)
   where
     getHeaders' hs = getHeadersFromHList $ getHeadersHList hs
 
 -- * Adding headers
 
 -- We need all these fundeps to save type inference
-class AddHeader h v orig new
-    | h v orig -> new, new -> h, new -> v, new -> orig where
+class AddHeader (mods :: [*]) h v orig new
+    | mods h v orig -> new, new -> mods, new -> h, new -> v, new -> orig where
   addOptionalHeader :: ResponseHeader h v -> orig -> new  -- ^ N.B.: The same header can't be added multiple times
 
 -- In this instance, we add a Header on top of something that is already decorated with some headers
 instance {-# OVERLAPPING #-} ( KnownSymbol h, ToHttpApiData v )
-         => AddHeader h v (Headers (fst ': rest)  a) (Headers (Header h v  ': fst ': rest) a) where
+         => AddHeader mods h v (Headers (fst ': rest)  a) (Headers (Header' mods h v  ': fst ': rest) a) where
     addOptionalHeader hdr (Headers resp heads) = Headers resp (HCons hdr heads)
 
 -- In this instance, 'a' parameter is decorated with a Header.
-instance {-# OVERLAPPABLE #-} ( KnownSymbol h, ToHttpApiData v , new ~ Headers '[Header h v] a)
-         => AddHeader h v a new where
+instance {-# OVERLAPPABLE #-} ( KnownSymbol h, ToHttpApiData v , new ~ Headers '[Header' mods h v] a)
+         => AddHeader mods h v a new where
     addOptionalHeader hdr resp = Headers resp (HCons hdr HNil)
 
 -- Instances to decorate all responses in a 'Union' with headers. The functional
 -- dependencies force us to consider singleton lists as the base case in the
 -- recursion (it is impossible to determine h and v otherwise from old / new
 -- responses if the list is empty).
-instance (AddHeader h v old new) => AddHeader h v (Union '[old]) (Union '[new]) where
+instance (AddHeader mods h v old new) => AddHeader mods h v (Union '[old]) (Union '[new]) where
   addOptionalHeader hdr resp =
     SOP.Z $ SOP.I $ addOptionalHeader hdr $ SOP.unI $ SOP.unZ $ resp
 
 instance
-  ( AddHeader h v old new, AddHeader h v (Union oldrest) (Union newrest)
+  ( AddHeader mods h v old new, AddHeader mods h v (Union oldrest) (Union newrest)
   -- This ensures that the remainder of the response list is _not_ empty
   -- It is necessary to prevent the two instances for union types from
   -- overlapping.
   , oldrest ~ (a ': as), newrest ~ (b ': bs))
-  => AddHeader h v (Union (old ': (a ': as))) (Union (new ': (b ': bs))) where
+  => AddHeader mods h v (Union (old ': (a ': as))) (Union (new ': (b ': bs))) where
   addOptionalHeader hdr resp = case resp of
     SOP.Z (SOP.I rHead) -> SOP.Z $ SOP.I $ addOptionalHeader hdr rHead
     SOP.S rOthers -> SOP.S $ addOptionalHeader hdr rOthers
@@ -211,7 +211,7 @@ instance
 -- Note that while in your handlers type annotations are not required, since
 -- the type can be inferred from the API type, in other cases you may find
 -- yourself needing to add annotations.
-addHeader :: AddHeader h v orig new => v -> orig -> new
+addHeader :: AddHeader mods h v orig new => v -> orig -> new
 addHeader = addOptionalHeader . Header
 
 -- | Deliberately do not add a header to a value.
@@ -219,13 +219,13 @@ addHeader = addOptionalHeader . Header
 -- >>> let example1 = noHeader "hi" :: Headers '[Header "someheader" Int] String
 -- >>> getHeaders example1
 -- []
-noHeader :: AddHeader h v orig new => orig -> new
+noHeader :: AddHeader mods h v orig new => orig -> new
 noHeader = addOptionalHeader MissingHeader
 
 class HasResponseHeader h a headers where
   hlistLookupHeader :: HList headers -> ResponseHeader h a
 
-instance {-# OVERLAPPING #-} HasResponseHeader h a (Header h a ': rest) where
+instance {-# OVERLAPPING #-} HasResponseHeader h a (Header' mods h a ': rest) where
   hlistLookupHeader (HCons ha _) = ha
 
 instance {-# OVERLAPPABLE #-} (HasResponseHeader h a rest) => HasResponseHeader h a (first ': rest) where
